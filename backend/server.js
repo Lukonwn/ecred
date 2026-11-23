@@ -11,6 +11,10 @@ app.disable("x-powered-by");
 
 app.use(helmet());
 
+// ======================================
+// CORS
+// ======================================
+
 const allowedOrigins = (process.env.FRONTEND_ORIGIN || "")
   .split(",")
   .map(origin => origin.trim())
@@ -30,7 +34,10 @@ app.use(cors({
 
 app.use(express.json({ limit: "20kb" }));
 
-// Conexão com PostgreSQL
+// ======================================
+// POSTGRESQL
+// ======================================
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 5000,
@@ -38,7 +45,7 @@ const pool = new Pool({
 });
 
 // ======================================
-// TESTE DA API
+// HEALTH CHECK
 // ======================================
 
 app.get("/health", (req, res) => {
@@ -50,7 +57,7 @@ app.get("/health", (req, res) => {
 });
 
 // ======================================
-// TESTE DO POSTGRESQL
+// TESTE DO BANCO DE DADOS
 // ======================================
 
 app.get("/health/db", async (req, res) => {
@@ -73,7 +80,7 @@ app.get("/health/db", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Falha no teste de conexão PostgreSQL");
+    console.error("Falha no teste PostgreSQL:", error.message);
 
     return res.status(503).json({
       status: "error",
@@ -83,13 +90,14 @@ app.get("/health/db", async (req, res) => {
 });
 
 // ======================================
-// TESTE DA INTEGRAÇÃO SEARCHAPI
+// CONSULTA CPF - SEARCHAPI
 // ======================================
 
 app.post("/api/cpf-test", async (req, res) => {
   const startedAt = Date.now();
 
   try {
+    // Recebe e valida o CPF
     const cpf = String(req.body?.cpf || "")
       .replace(/\D/g, "");
 
@@ -103,6 +111,7 @@ app.post("/api/cpf-test", async (req, res) => {
       });
     }
 
+    // Carrega as variáveis da Railway
     const baseUrl = process.env.SEARCHAPI_BASE_URL;
     const token = process.env.SEARCHAPI_TOKEN_API;
 
@@ -116,11 +125,13 @@ app.post("/api/cpf-test", async (req, res) => {
       });
     }
 
+    // Monta a URL da SearchAPI
     const url = new URL(baseUrl);
 
     url.searchParams.set("cpf", cpf);
     url.searchParams.set("token_api", token);
 
+    // Consulta o provedor
     const response = await fetch(url, {
       method: "GET",
       headers: {
@@ -141,9 +152,10 @@ app.post("/api/cpf-test", async (req, res) => {
 
     const elapsedMs = Date.now() - startedAt;
 
+    // Verifica a resposta
     if (!response.ok || !apiData) {
       console.error(
-        "SearchAPI retornou erro. HTTP:",
+        "Erro SearchAPI. Status HTTP:",
         response.status
       );
 
@@ -156,18 +168,46 @@ app.post("/api/cpf-test", async (req, res) => {
       });
     }
 
+    // Extrai o registro retornado
+    const registro = Array.isArray(apiData.dados)
+      ? apiData.dados[0]
+      : apiData.dados || null;
+
+    if (!registro || typeof registro !== "object") {
+      return res.status(200).json({
+        configured: true,
+        ok: false,
+        status: response.status,
+        elapsedMs,
+        error: apiData.status || "Nenhum registro encontrado"
+      });
+    }
+
+    // Converte os campos da SearchAPI
+    // para o formato esperado pelo painel Ecred
+    const dadosFormatados = {
+      cpf: registro.CPF || cpf,
+      name: registro.NOME || "",
+      birthDate: registro.NASC || "",
+      motherName: registro.NOME_MAE || ""
+    };
+
     return res.status(200).json({
       configured: true,
-      ok: true,
+      ok: Boolean(dadosFormatados.name),
       status: response.status,
       elapsedMs,
-      data: apiData
+      data: dadosFormatados,
+      error: dadosFormatados.name
+        ? null
+        : "O registro não possui nome disponível"
     });
 
   } catch (error) {
     console.error(
-      "Erro na consulta SearchAPI:",
-      error.name
+      "Falha na consulta SearchAPI:",
+      error.name,
+      error.message
     );
 
     return res.status(200).json({
@@ -186,7 +226,7 @@ app.post("/api/cpf-test", async (req, res) => {
 });
 
 // ======================================
-// TRATAMENTO DE ROTAS INEXISTENTES
+// ROTAS NÃO ENCONTRADAS
 // ======================================
 
 app.use((req, res) => {
@@ -209,7 +249,7 @@ app.use((err, req, res, next) => {
     });
   }
 
-  res.status(500).json({
+  return res.status(500).json({
     error: "Erro interno do servidor"
   });
 });
