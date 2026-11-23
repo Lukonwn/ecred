@@ -8,12 +8,7 @@ const { Pool } = pg;
 const app = express();
 
 app.disable("x-powered-by");
-
 app.use(helmet());
-
-// ======================================
-// CORS
-// ======================================
 
 const allowedOrigins = (process.env.FRONTEND_ORIGIN || "")
   .split(",")
@@ -45,6 +40,83 @@ const pool = new Pool({
 });
 
 // ======================================
+// FUNÇÃO DE CONSULTA SEARCHAPI
+// ======================================
+
+async function consultarSearchAPI(cpf) {
+  const baseUrl = process.env.SEARCHAPI_BASE_URL;
+  const token = process.env.SEARCHAPI_TOKEN_API;
+
+  if (!baseUrl || !token) {
+    const error = new Error("SearchAPI não configurada na Railway");
+    error.code = "NOT_CONFIGURED";
+    throw error;
+  }
+
+  const url = new URL(baseUrl);
+
+  url.searchParams.set("cpf", cpf);
+  url.searchParams.set("token_api", token);
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json"
+    },
+    signal: AbortSignal.timeout(20000)
+  });
+
+  const responseText = await response.text();
+
+  let result;
+
+  try {
+    result = JSON.parse(responseText);
+  } catch {
+    const error = new Error("A SearchAPI não retornou JSON válido");
+    error.code = "INVALID_RESPONSE";
+    throw error;
+  }
+
+  if (!response.ok) {
+    const error = new Error("A SearchAPI retornou erro HTTP");
+    error.code = "PROVIDER_ERROR";
+    error.providerStatus = response.status;
+    throw error;
+  }
+
+  return result;
+}
+
+// ======================================
+// EXTRAÇÃO DOS DADOS
+// ======================================
+
+function extrairRegistro(result) {
+  const dados = result?.dados;
+
+  if (Array.isArray(dados)) {
+    return dados[0] || null;
+  }
+
+  if (dados && typeof dados === "object") {
+    return dados;
+  }
+
+  return null;
+}
+
+function formatarRegistro(registro, cpf) {
+  return {
+    cpf: registro.CPF || cpf,
+    name: registro.NOME || "",
+    birthDate: registro.NASC || "",
+    motherName: registro.NOME_MAE || "",
+    gender: registro.GENERO || registro.SEXO || ""
+  };
+}
+
+// ======================================
 // HEALTH CHECK
 // ======================================
 
@@ -57,7 +129,7 @@ app.get("/health", (req, res) => {
 });
 
 // ======================================
-// TESTE DO BANCO DE DADOS
+// TESTE POSTGRESQL
 // ======================================
 
 app.get("/health/db", async (req, res) => {
@@ -80,24 +152,23 @@ app.get("/health/db", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Falha no teste PostgreSQL:", error.message);
+    console.error("Erro PostgreSQL:", error.message);
 
     return res.status(503).json({
       status: "error",
-      message: "Não foi possível conectar ao banco de dados"
+      message: "Falha na conexão com PostgreSQL"
     });
   }
 });
 
 // ======================================
-// CONSULTA CPF - SEARCHAPI
+// CPF TEST - PAINEL ADMINISTRATIVO
 // ======================================
 
 app.post("/api/cpf-test", async (req, res) => {
   const startedAt = Date.now();
 
   try {
-    // Recebe e valida o CPF
     const cpf = String(req.body?.cpf || "")
       .replace(/\D/g, "");
 
@@ -107,120 +178,105 @@ app.post("/api/cpf-test", async (req, res) => {
         ok: false,
         status: 400,
         elapsedMs: Date.now() - startedAt,
-        error: "CPF deve conter 11 dígitos"
+        error: "CPF inválido"
       });
     }
 
-    // Carrega as variáveis da Railway
-    const baseUrl = process.env.SEARCHAPI_BASE_URL;
-    const token = process.env.SEARCHAPI_TOKEN_API;
+    const result = await consultarSearchAPI(cpf);
+    const registro = extrairRegistro(result);
 
-    if (!baseUrl || !token) {
+    if (!registro) {
       return res.status(200).json({
-        configured: false,
+        configured: true,
         ok: false,
-        status: 0,
+        status: 200,
         elapsedMs: Date.now() - startedAt,
-        error: "SearchAPI não configurada na Railway"
+        error: result?.status || "Nenhum registro encontrado"
       });
     }
 
-    // Monta a URL da SearchAPI
-    const url = new URL(baseUrl);
-
-    url.searchParams.set("cpf", cpf);
-    url.searchParams.set("token_api", token);
-
-    // Consulta o provedor
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        Accept: "application/json"
-      },
-      signal: AbortSignal.timeout(20000)
-    });
-
-    const responseText = await response.text();
-
-    let apiData;
-
-    try {
-      apiData = JSON.parse(responseText);
-    } catch {
-      apiData = null;
-    }
-
-    const elapsedMs = Date.now() - startedAt;
-
-    // Verifica a resposta
-    if (!response.ok || !apiData) {
-      console.error(
-        "Erro SearchAPI. Status HTTP:",
-        response.status
-      );
-
-      return res.status(200).json({
-        configured: true,
-        ok: false,
-        status: response.status,
-        elapsedMs,
-        error: "Erro na resposta da SearchAPI"
-      });
-    }
-
-    // Extrai o registro retornado
-    const registro = Array.isArray(apiData.dados)
-      ? apiData.dados[0]
-      : apiData.dados || null;
-
-    if (!registro || typeof registro !== "object") {
-      return res.status(200).json({
-        configured: true,
-        ok: false,
-        status: response.status,
-        elapsedMs,
-        error: apiData.status || "Nenhum registro encontrado"
-      });
-    }
-
-    // Converte os campos da SearchAPI
-    // para o formato esperado pelo painel Ecred
-    const dadosFormatados = {
-      cpf: registro.CPF || cpf,
-      name: registro.NOME || "",
-      birthDate: registro.NASC || "",
-      motherName: registro.NOME_MAE || ""
-    };
+    const data = formatarRegistro(registro, cpf);
 
     return res.status(200).json({
       configured: true,
-      ok: Boolean(dadosFormatados.name),
-      status: response.status,
-      elapsedMs,
-      data: dadosFormatados,
-      error: dadosFormatados.name
-        ? null
-        : "O registro não possui nome disponível"
+      ok: Boolean(data.name),
+      status: 200,
+      elapsedMs: Date.now() - startedAt,
+      data,
+      error: data.name ? null : "Nome não encontrado"
     });
 
   } catch (error) {
-    console.error(
-      "Falha na consulta SearchAPI:",
-      error.name,
-      error.message
-    );
+    console.error("Erro CPF TEST:", error.code || error.message);
 
     return res.status(200).json({
-      configured: Boolean(
-        process.env.SEARCHAPI_BASE_URL &&
-        process.env.SEARCHAPI_TOKEN_API
-      ),
+      configured: error.code !== "NOT_CONFIGURED",
       ok: false,
-      status: 0,
+      status: error.providerStatus || 0,
       elapsedMs: Date.now() - startedAt,
-      error: error.name === "TimeoutError"
-        ? "Tempo limite da SearchAPI excedido"
-        : "Falha ao conectar com a SearchAPI"
+      error: error.message
+    });
+  }
+});
+
+// ======================================
+// CPF LOOKUP - CHECKOUT
+// ======================================
+
+app.post("/api/cpf-lookup", async (req, res) => {
+  const startedAt = Date.now();
+
+  try {
+    const cpf = String(req.body?.cpf || "")
+      .replace(/\D/g, "");
+
+    if (cpf.length !== 11) {
+      return res.status(400).json({
+        configured: true,
+        ok: false,
+        error: "CPF inválido"
+      });
+    }
+
+    const result = await consultarSearchAPI(cpf);
+    const registro = extrairRegistro(result);
+
+    if (!registro) {
+      return res.status(200).json({
+        configured: true,
+        ok: false,
+        error: result?.status || "Nenhum registro encontrado"
+      });
+    }
+
+    const dados = formatarRegistro(registro, cpf);
+
+    if (!dados.name) {
+      return res.status(200).json({
+        configured: true,
+        ok: false,
+        error: "Nome não encontrado na resposta da SearchAPI"
+      });
+    }
+
+    // Campos diretamente na raiz:
+    // é o formato esperado pela chamada do checkout.
+    return res.status(200).json({
+      configured: true,
+      ok: true,
+      name: dados.name,
+      birthDate: dados.birthDate,
+      motherName: dados.motherName,
+      gender: dados.gender
+    });
+
+  } catch (error) {
+    console.error("Erro CPF LOOKUP:", error.code || error.message);
+
+    return res.status(502).json({
+      configured: error.code !== "NOT_CONFIGURED",
+      ok: false,
+      error: error.message
     });
   }
 });
