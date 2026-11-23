@@ -2,6 +2,9 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import pg from "pg";
+
+const { Pool } = pg;
 
 const app = express();
 
@@ -16,7 +19,6 @@ const allowedOrigins = (process.env.FRONTEND_ORIGIN || "")
 
 app.use(cors({
   origin(origin, callback) {
-    // Permite chamadas sem Origin, como verificações internas.
     if (!origin) return callback(null, true);
 
     if (allowedOrigins.includes(origin)) {
@@ -29,6 +31,14 @@ app.use(cors({
 
 app.use(express.json({ limit: "20kb" }));
 
+// Conexão com o PostgreSQL existente
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 5000,
+  max: 5
+});
+
+// Teste básico da API
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "online",
@@ -37,8 +47,38 @@ app.get("/health", (req, res) => {
   });
 });
 
+// Teste real do PostgreSQL
+app.get("/health/db", async (req, res) => {
+  if (!process.env.DATABASE_URL) {
+    return res.status(503).json({
+      status: "error",
+      message: "DATABASE_URL não configurada"
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT NOW() AS database_time"
+    );
+
+    return res.status(200).json({
+      status: "connected",
+      database: "PostgreSQL",
+      timestamp: result.rows[0].database_time
+    });
+
+  } catch (error) {
+    console.error("Falha no teste de conexão PostgreSQL");
+
+    return res.status(503).json({
+      status: "error",
+      message: "Não foi possível conectar ao banco de dados"
+    });
+  }
+});
+
 app.use((err, req, res, next) => {
-  console.error("Erro na aplicação:", err.message);
+  console.error("Erro na aplicação");
 
   res.status(500).json({
     error: "Erro interno do servidor"
